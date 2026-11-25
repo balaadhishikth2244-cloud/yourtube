@@ -6,18 +6,22 @@ import SignInButton from "@/components/SignInButton";
 import { useAuth } from "@/lib/useAuth";
 import { db } from "@/lib/firebase";
 import {
-  doc, getDoc, updateDoc, arrayUnion,
+  doc, getDoc, updateDoc, setDoc, arrayUnion,
   collection, addDoc, query, where,
   onSnapshot, orderBy, deleteDoc
 } from "firebase/firestore";
 import Link from "next/link";
+import {
+  Menu as MenuIcon, Home as HomeIcon, PlaySquare, History as HistoryIcon,
+  ThumbsUp as ThumbsUpIcon, Clock as ClockIcon, User as UserIcon,
+} from "lucide-react";
 import { useTheme } from "@/lib/useTheme";
 import GesturePlayer from "@/components/GesturePlayer";
 import { recordWatch } from "@/lib/watchHistory";
 import { likeVideo, unlikeVideo, isVideoLiked } from "@/lib/likedVideos";
 import { addToWatchLater, removeFromWatchLater, isInWatchLater } from "@/lib/watchLater";
-import { getUploadedVideoById } from "@/lib/uploadedVideos";
-import { subscribeToChannel, unsubscribeFromChannel, isSubscribedTo } from "@/lib/subscriptions";
+import { getUploadedVideoById, incrementVideoViews, formatViews } from "@/lib/uploadedVideos";
+import { subscribeToChannel, unsubscribeFromChannel, isSubscribedTo, getSubscriberCount } from "@/lib/subscriptions";
 
 interface VideoData {
   id: string;
@@ -32,6 +36,15 @@ interface VideoData {
   isUploaded: boolean;
 }
 
+// Watch-time limit per plan, in seconds (null = unlimited)
+const WATCH_LIMITS: Record<string, number | null> = {
+  free: 5 * 60,
+  bronze: 7 * 60,
+  silver: 10 * 60,
+  gold: null,
+  premium: null,
+};
+
 export default function VideoPage() {
   const { id } = useParams();
   const videoId = Array.isArray(id) ? id[0] : id;
@@ -45,9 +58,28 @@ export default function VideoPage() {
   const [showDescription, setShowDescription] = useState(false);
   const [videoLiked, setVideoLiked] = useState(false);
   const [videoDisliked, setVideoDisliked] = useState(false);
-  const [videoLikes, setVideoLikes] = useState(4500);
+  const [videoLikes, setVideoLikes] = useState(0);
   const [watchLaterAdded, setWatchLaterAdded] = useState(false);
   const [subscribed, setSubscribed] = useState(false);
+  const [subscriberCount, setSubscriberCount] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [userPlan, setUserPlan] = useState("free");
+  const maxWatchSeconds = userPlan in WATCH_LIMITS ? WATCH_LIMITS[userPlan] : WATCH_LIMITS.free;
+
+  // Load the signed-in user's plan (signed-out visitors are treated as Free)
+  useEffect(() => {
+    if (!user) { setUserPlan("free"); return; }
+    getDoc(doc(db, "users", user.uid))
+      .then((snap) => setUserPlan(snap.data()?.plan || "free"))
+      .catch(() => setUserPlan("free"));
+  }, [user]);
+
+  // Close the side menu with the Escape key
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const [comments, setComments] = useState<{
     id: string;
     text: string;
@@ -92,6 +124,14 @@ export default function VideoPage() {
     }
     getUploadedVideoById(videoId).then((uploaded) => {
       if (uploaded) {
+        // Count one view per browser tab session
+        const viewKey = `viewed:${uploaded.id}`;
+        let alreadyCounted = false;
+        try { alreadyCounted = !!sessionStorage.getItem(viewKey); } catch {}
+        if (!alreadyCounted) {
+          try { sessionStorage.setItem(viewKey, "1"); } catch {}
+          incrementVideoViews(uploaded.id).catch((err) => console.error("View count error:", err));
+        }
         setVideo({
           id: uploaded.id,
           title: uploaded.title,
@@ -99,7 +139,7 @@ export default function VideoPage() {
           channelId: uploaded.channelId,
           thumbnail: uploaded.thumbnail,
           videoUrl: uploaded.videoUrl,
-          views: uploaded.views,
+          views: alreadyCounted ? uploaded.views : uploaded.views + 1,
           duration: uploaded.duration,
           description: uploaded.description,
           isUploaded: true,
@@ -146,6 +186,14 @@ export default function VideoPage() {
     if (!video || !user) return;
     isSubscribedTo(user.uid, video.channelId || video.channel).then(setSubscribed).catch(() => {});
   }, [video, user]);
+
+  // Real subscriber count for this channel
+  useEffect(() => {
+    if (!video) return;
+    getSubscriberCount(video.channelId || video.channel)
+      .then(setSubscriberCount)
+      .catch(() => setSubscriberCount(0));
+  }, [video]);
 
   if (loadingVideo) {
     return <div style={{ color: "#fff", padding: "40px", backgroundColor: "#0f0f0f", minHeight: "100vh" }}>Loading...</div>;
@@ -236,7 +284,6 @@ export default function VideoPage() {
 
   const handleDownload = async () => {
     if (!user) { alert("Please sign in to download."); return; }
-    if (video.isUploaded) { alert("Downloads aren't available for uploaded videos yet."); return; }
     setDownloading(true);
     const userRef = doc(db, "users", user.uid);
     const snap = await getDoc(userRef);
@@ -245,24 +292,29 @@ export default function VideoPage() {
     const lastDate = data?.lastDownloadDate?.toDate?.()?.toDateString?.() || "";
     const downloadsToday = lastDate === today ? (data?.downloadsToday || 0) : 0;
     const plan = data?.plan || "free";
-    const maxDownloads: Record<string, number> = { free: 1, bronze: 5, silver: 20, gold: 999 };
+    const maxDownloads: Record<string, number> = { free: 1, bronze: 3, silver: 10, gold: 999, premium: 999 };
     const limit = maxDownloads[plan] ?? 1;
     if (downloadsToday >= limit) {
       alert(`${plan} plan allows ${limit} download(s)/day. Upgrade!`);
       setDownloading(false);
       return;
     }
+    // Cloudinary videos open inline unless asked to download, so add the attachment flag
+    const downloadUrl =
+      video.videoUrl.includes("/upload/") && !video.videoUrl.includes("fl_attachment")
+        ? video.videoUrl.replace("/upload/", "/upload/fl_attachment/")
+        : video.videoUrl;
     const link = document.createElement("a");
-    link.href = video.videoUrl;
+    link.href = downloadUrl;
     link.download = `${video.title}.mp4`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    await updateDoc(userRef, {
+    await setDoc(userRef, {
       downloadsToday: downloadsToday + 1,
       lastDownloadDate: new Date(),
       downloads: arrayUnion({ videoId: video.id, title: video.title, thumbnail: video.thumbnail, downloadedAt: new Date().toISOString() }),
-    });
+    }, { merge: true });
     setDownloading(false);
   };
 
@@ -292,7 +344,7 @@ export default function VideoPage() {
       name: "YouTube Clone Premium", description: "Unlimited video downloads",
       order_id: order.id,
       handler: async function () {
-        await updateDoc(doc(db, "users", user.uid), { plan: "premium" });
+        await setDoc(doc(db, "users", user.uid), { plan: "premium" }, { merge: true });
         alert("🎉 You are now Premium!");
         setUpgrading(false);
       },
@@ -305,12 +357,19 @@ export default function VideoPage() {
     setUpgrading(false);
   };
 
+  const formatSubscribers = (n: number) => {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M subscribers";
+    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K subscribers";
+    return n === 1 ? "1 subscriber" : `${n} subscribers`;
+  };
+
   const handleSubscribe = async () => {
     if (!user) { alert("Please sign in to subscribe."); return; }
     if (!video) return;
     const channelId = video.channelId || video.channel; // channel page uses the owner's uid as the ID
     const next = !subscribed;
     setSubscribed(next);
+    setSubscriberCount((c) => Math.max(0, c + (next ? 1 : -1)));
     try {
       if (next) {
         await subscribeToChannel(user.uid, channelId, video.channel);
@@ -321,6 +380,7 @@ export default function VideoPage() {
       console.error("Subscribe error:", err);
       alert("Something went wrong: " + (err as Error).message);
       setSubscribed(!next);
+      setSubscriberCount((c) => Math.max(0, c + (next ? -1 : 1)));
     }
   };
 
@@ -384,6 +444,17 @@ export default function VideoPage() {
         borderBottom: `1px solid ${borderColor}`, height: "56px"
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+          <button
+            type="button"
+            aria-label="Open menu"
+            onClick={() => setMenuOpen(true)}
+            style={{
+              background: "none", border: "none", cursor: "pointer", padding: "8px",
+              borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+          >
+            <MenuIcon size={24} color={textColor} strokeWidth={1.75} />
+          </button>
           <Link href="/" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: "4px" }}>
             <span style={{ color: "#ff0000", fontSize: "24px" }}>▶</span>
             <span style={{ color: textColor, fontSize: "18px", fontWeight: "bold" }}>YourTube</span>
@@ -401,6 +472,64 @@ export default function VideoPage() {
       </div>
 
       {/* Theme bar */}
+      {/* Side menu (opens from the hamburger button) */}
+      <div
+        onClick={() => setMenuOpen(false)}
+        style={{
+          position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.6)", zIndex: 300,
+          opacity: menuOpen ? 1 : 0, pointerEvents: menuOpen ? "auto" : "none",
+          transition: "opacity 0.2s ease",
+        }}
+      />
+      <div style={{
+        position: "fixed", top: 0, left: 0, bottom: 0, width: "240px", zIndex: 301,
+        backgroundColor: isLight ? "#ffffff" : "#0f0f0f", overflowY: "auto",
+        transform: menuOpen ? "translateX(0)" : "translateX(-100%)",
+        transition: "transform 0.25s ease",
+        borderRight: `1px solid ${borderColor}`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "16px", padding: "8px 16px", height: "56px" }}>
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={() => setMenuOpen(false)}
+            style={{ background: "none", border: "none", cursor: "pointer", padding: "8px", display: "flex" }}
+          >
+            <MenuIcon size={24} color={textColor} strokeWidth={1.75} />
+          </button>
+          <Link href="/" onClick={() => setMenuOpen(false)} style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: "4px" }}>
+            <span style={{ color: "#ff0000", fontSize: "24px" }}>▶</span>
+            <span style={{ color: textColor, fontSize: "18px", fontWeight: "bold" }}>YourTube</span>
+            <span style={{ color: subColor, fontSize: "10px", marginTop: "8px" }}>IN</span>
+          </Link>
+        </div>
+        <div style={{ padding: "4px 0" }}>
+          {[
+            { icon: HomeIcon, label: "Home", href: "/" },
+            { icon: PlaySquare, label: "Subscriptions", href: "/subscriptions" },
+            { icon: HistoryIcon, label: "History", href: "/history" },
+            { icon: ThumbsUpIcon, label: "Liked videos", href: "/liked" },
+            { icon: ClockIcon, label: "Watch later", href: "/watch-later" },
+            { icon: UserIcon, label: "You", href: user ? `/channel/${user.uid}` : "/profile" },
+          ].map((item) => (
+            <Link key={item.label} href={item.href} onClick={() => setMenuOpen(false)} style={{ textDecoration: "none" }}>
+              <div
+                style={{
+                  display: "flex", alignItems: "center", gap: "24px",
+                  padding: "10px 24px", margin: "2px 8px", borderRadius: "10px",
+                  color: textColor, fontSize: "14px", cursor: "pointer",
+                }}
+                onMouseOver={(e) => (e.currentTarget.style.backgroundColor = cardBg)}
+                onMouseOut={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+              >
+                <item.icon size={22} color={textColor} strokeWidth={1.75} />
+                <span>{item.label}</span>
+              </div>
+            </Link>
+          ))}
+        </div>
+      </div>
+
       <div style={{ textAlign: "center", padding: "4px", backgroundColor: isLight ? "#fff8e1" : "#1a1a1a", color: subColor, fontSize: "11px", marginTop: "56px" }}>
         {isLight ? "☀️ Light theme (South India + 10AM-12AM IST)" : "🌙 Dark theme active"}
       </div>
@@ -414,6 +543,8 @@ export default function VideoPage() {
           <GesturePlayer
             videoUrl={video.videoUrl}
             videoId={video.id}
+            maxWatchSeconds={maxWatchSeconds}
+            planName={userPlan.charAt(0).toUpperCase() + userPlan.slice(1)}
             onOpenComments={() => {
               setShowComments(true);
               setTimeout(() => document.getElementById("comments-section")?.scrollIntoView({ behavior: "smooth" }), 100);
@@ -435,7 +566,7 @@ export default function VideoPage() {
               </div>
               <div>
                 <p style={{ color: textColor, margin: 0, fontWeight: "bold", fontSize: "15px" }}>{video.channel}</p>
-                <p style={{ color: subColor, margin: 0, fontSize: "12px" }}>1.2M subscribers</p>
+                <p style={{ color: subColor, margin: 0, fontSize: "12px" }}>{formatSubscribers(subscriberCount)}</p>
               </div>
               <button
                 onClick={handleSubscribe}
@@ -521,7 +652,7 @@ export default function VideoPage() {
 
           <div style={{ backgroundColor: cardBg, borderRadius: "12px", padding: "12px 16px", marginBottom: "24px" }}>
             <p style={{ color: textColor, margin: "0 0 4px 0", fontSize: "14px", fontWeight: "bold" }}>
-              {(video.views / 1000).toFixed(0)}K views
+              {formatViews(video.views)}
             </p>
             <p style={{ color: textColor, margin: 0, fontSize: "14px" }}>
               {showDescription ? video.description : (video.description || "").slice(0, 100) + "..."}
@@ -659,7 +790,7 @@ export default function VideoPage() {
                     {v.title}
                   </p>
                   <p style={{ color: subColor, margin: "0 0 2px 0", fontSize: "12px" }}>{v.channel}</p>
-                  <p style={{ color: subColor, margin: 0, fontSize: "12px" }}>{(v.views / 1000).toFixed(0)}K views</p>
+                  <p style={{ color: subColor, margin: 0, fontSize: "12px" }}>{formatViews(v.views)}</p>
                 </div>
               </div>
             </Link>

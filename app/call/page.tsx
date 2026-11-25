@@ -19,6 +19,7 @@ export default function CallPage() {
   const callRef = useRef<any>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
@@ -47,6 +48,7 @@ export default function CallPage() {
         call.on("stream", (remoteStream) => {
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
         });
+        call.on("close", () => setStatus("idle"));
       });
     };
 
@@ -84,6 +86,12 @@ export default function CallPage() {
   };
 
   const endCall = () => {
+    // Save the recording if one is running, and stop any screen share
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    screenStreamRef.current?.getTracks().forEach(t => t.stop());
+    screenStreamRef.current = null;
     callRef.current?.close();
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
@@ -94,22 +102,39 @@ export default function CallPage() {
     setCameraError("");
   };
 
+  const getVideoSender = () =>
+    (callRef.current?.peerConnection as RTCPeerConnection | undefined)
+      ?.getSenders()
+      ?.find((s: RTCRtpSender) => s.track?.kind === "video");
+
+  const stopScreenShare = () => {
+    screenStreamRef.current?.getTracks().forEach(t => t.stop());
+    screenStreamRef.current = null;
+    // Send the camera back to the friend and restore your own preview
+    const cameraTrack = localStreamRef.current?.getVideoTracks()[0];
+    const sender = getVideoSender();
+    if (sender && cameraTrack) sender.replaceTrack(cameraTrack);
+    if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
+    setIsScreenSharing(false);
+  };
+
   const startScreenShare = async () => {
     try {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      screenStreamRef.current = screenStream;
       if (localVideoRef.current) localVideoRef.current.srcObject = screenStream;
       const videoTrack = screenStream.getVideoTracks()[0];
-      const sender = (callRef.current?.peerConnection as RTCPeerConnection)
-        ?.getSenders()
-        ?.find((s: RTCRtpSender) => s.track?.kind === "video");
-      if (sender) sender.replaceTrack(videoTrack);
+      const sender = getVideoSender();
+      if (!sender) {
+        alert("Screen sharing needs a camera on this call (no video connection was found).");
+        screenStream.getTracks().forEach(t => t.stop());
+        screenStreamRef.current = null;
+        return;
+      }
+      sender.replaceTrack(videoTrack);
       setIsScreenSharing(true);
-      videoTrack.onended = () => {
-        setIsScreenSharing(false);
-        if (localStreamRef.current && localVideoRef.current) {
-          localVideoRef.current.srcObject = localStreamRef.current;
-        }
-      };
+      // Also fires when the user clicks the browser's own "Stop sharing" bar
+      videoTrack.onended = () => stopScreenShare();
     } catch {
       alert("Screen sharing cancelled or not supported.");
     }
@@ -158,8 +183,8 @@ export default function CallPage() {
       }}>
         <Link href="/" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: "4px" }}>
           <span style={{ color: "#ff0000", fontSize: "24px" }}>▶</span>
-          <span style={{ color: "#fff", fontSize: "18px", fontWeight: "bold" }}>YourTube</span>
-          <span style={{ color: "#aaa", fontSize: "10px", marginTop: "8px" }}>IN</span>
+          <span style={{ color: textColor, fontSize: "18px", fontWeight: "bold" }}>YourTube</span>
+          <span style={{ color: subColor, fontSize: "10px", marginTop: "8px" }}>IN</span>
         </Link>
         <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
           <Link href="/plans" style={{ color: "#ffd700", textDecoration: "none", fontSize: "14px", fontWeight: "bold" }}>
@@ -269,7 +294,7 @@ export default function CallPage() {
         {status === "in-call" && (
           <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", marginBottom: "20px" }}>
             <button
-              onClick={isScreenSharing ? () => setIsScreenSharing(false) : startScreenShare}
+              onClick={isScreenSharing ? stopScreenShare : startScreenShare}
               style={{
                 padding: "10px 20px", borderRadius: "8px", border: "none", cursor: "pointer",
                 backgroundColor: isScreenSharing ? "#ffd700" : "#333",

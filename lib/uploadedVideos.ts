@@ -1,6 +1,7 @@
 import { db } from "@/lib/firebase";
 import {
-  collection, addDoc, doc, getDoc, getDocs, query, where, orderBy, serverTimestamp
+  collection, addDoc, doc, getDoc, getDocs, query, where, orderBy, serverTimestamp,
+  updateDoc, increment
 } from "firebase/firestore";
 
 export interface UploadedVideo {
@@ -97,6 +98,16 @@ export async function getAllUploadedVideos(): Promise<UploadedVideo[]> {
   const q = query(collection(db, "uploadedVideos"), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, channelId: d.data().ownerId, ...d.data() } as UploadedVideo));
+}
+
+export function formatViews(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M views";
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, "") + "K views";
+  return n === 1 ? "1 view" : `${n} views`;
+}
+
+export async function incrementVideoViews(videoId: string): Promise<void> {
+  await updateDoc(doc(db, "uploadedVideos", videoId), { views: increment(1) });
 }
 
 export async function getUploadedVideoById(videoId: string): Promise<UploadedVideo | null> {

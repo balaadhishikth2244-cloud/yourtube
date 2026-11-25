@@ -1,8 +1,9 @@
 "use client";
 
 import { videos as staticVideos } from "@/lib/videos";
-import { getAllUploadedVideos, UploadedVideo } from "@/lib/uploadedVideos";
+import { getAllUploadedVideos, UploadedVideo, formatViews } from "@/lib/uploadedVideos";
 import SignInButton from "@/components/SignInButton";
+import { useAuth } from "@/lib/useAuth";
 import Link from "next/link";
 import { useTheme } from "@/lib/useTheme";
 import { useState, useEffect, useRef } from "react";
@@ -30,6 +31,7 @@ interface FeedVideo {
 
 export default function Home() {
   const { isLight } = useTheme();
+  const { user } = useAuth();
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
@@ -215,7 +217,11 @@ export default function Home() {
             borderRight: `1px solid ${borderColor}`
           }}>
             {sidebarItems.map((item) => (
-              <Link key={item.label} href={item.href} style={{ textDecoration: "none" }}>
+              <Link
+                key={item.label}
+                href={item.label === "You" && user ? `/channel/${user.uid}` : item.href}
+                style={{ textDecoration: "none" }}
+              >
                 <div style={{
                   display: "flex", alignItems: "center", gap: "24px",
                   padding: "10px 24px", cursor: "pointer", color: textColor,
@@ -319,7 +325,7 @@ export default function Home() {
                         {video.channel}
                       </p>
                       <p style={{ color: subColor, margin: 0, fontSize: "12px" }}>
-                        {(video.views / 1000).toFixed(1)}K views
+                        {formatViews(video.views)}
                       </p>
                     </div>
                   </div>

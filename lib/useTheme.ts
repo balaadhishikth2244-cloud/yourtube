@@ -21,7 +21,7 @@ export function useTheme() {
         const istOffset = 5.5 * 60 * 60 * 1000;
         const istTime = new Date(now.getTime() + istOffset);
         const hours = istTime.getUTCHours();
-        const isCorrectTime = hours >= 10 && hours < 24;
+        const isCorrectTime = hours >= 10 && hours < 12; // 10:00 AM to 12:00 PM IST
 
         setRegion(state);
         setIsLight(isSouthIndia && isCorrectTime);

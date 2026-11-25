@@ -1,6 +1,7 @@
 "use client";
 import { useRef, useState, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { videos as staticVideos } from "@/lib/videos";
 import { getAllUploadedVideos } from "@/lib/uploadedVideos";
 
@@ -8,14 +9,31 @@ interface GesturePlayerProps {
   videoUrl: string;
   videoId: string;
   onOpenComments: () => void;
+  maxWatchSeconds?: number | null; // null / undefined = unlimited
+  planName?: string;
 }
 
-export default function GesturePlayer({ videoUrl, videoId, onOpenComments }: GesturePlayerProps) {
+export default function GesturePlayer({ videoUrl, videoId, onOpenComments, maxWatchSeconds, planName }: GesturePlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const router = useRouter();
   const [tapCount, setTapCount] = useState(0);
   const [tapPosition, setTapPosition] = useState<"left" | "center" | "right">("center");
   const [hint, setHint] = useState("");
+  const [limitReached, setLimitReached] = useState(false);
+
+  // New video or new plan: clear the "limit reached" screen
+  useEffect(() => { setLimitReached(false); }, [videoId, maxWatchSeconds]);
+
+  // Stop playback when the plan's watch-time limit is reached
+  const enforceLimit = () => {
+    const v = videoRef.current;
+    if (!v || !maxWatchSeconds) return;
+    if (v.currentTime >= maxWatchSeconds) {
+      v.pause();
+      v.currentTime = Math.max(0, maxWatchSeconds - 0.1);
+      setLimitReached(true);
+    }
+  };
   const tapTimer = useRef<NodeJS.Timeout | null>(null);
 
   // Playlist for "next video": uploaded videos (newest first) followed by the static ones
@@ -103,8 +121,35 @@ export default function GesturePlayer({ videoUrl, videoId, onOpenComments }: Ges
         ref={videoRef}
         src={videoUrl}
         controls
+        onTimeUpdate={enforceLimit}
+        onSeeking={enforceLimit}
+        onPlay={() => { if (limitReached) videoRef.current?.pause(); }}
         style={{ width: "100%", backgroundColor: "#000", display: "block" }}
       />
+
+      {/* Watch-time limit reached */}
+      {limitReached && maxWatchSeconds ? (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 10,
+          backgroundColor: "rgba(0,0,0,0.88)", color: "#fff",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          gap: "12px", textAlign: "center", padding: "20px",
+        }}>
+          <div style={{ fontSize: "36px" }}>⏱️</div>
+          <div style={{ fontSize: "18px", fontWeight: "bold" }}>
+            Watch limit reached ({Math.floor(maxWatchSeconds / 60)} min on the {planName || "Free"} plan)
+          </div>
+          <div style={{ fontSize: "14px", color: "#ccc" }}>
+            Upgrade your plan to keep watching this video.
+          </div>
+          <Link href="/plans" style={{
+            padding: "10px 24px", backgroundColor: "#ff0000", color: "#fff",
+            borderRadius: "20px", textDecoration: "none", fontWeight: "bold", fontSize: "14px",
+          }}>
+            ⭐ Upgrade plan
+          </Link>
+        </div>
+      ) : null}
 
       {/* Gesture overlay */}
       <div
